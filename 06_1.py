@@ -1,0 +1,130 @@
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+
+
+def movingAverage(curve, radius): 
+  window_size = 2 * radius + 1
+  # Define the filter 
+  f = np.ones(window_size)/window_size 
+  # Add padding to the boundaries 
+  curve_pad = np.lib.pad(curve, (radius, radius), 'edge') 
+  # Apply convolution 
+  curve_smoothed = np.convolve(curve_pad, f, mode='same') 
+  # Remove padding 
+  curve_smoothed = curve_smoothed[radius:-radius]
+  # return smoothed curve
+  return curve_smoothed 
+
+def smooth(trajectory): 
+  smoothed_trajectory = np.copy(trajectory) 
+  # Filter the x, y and angle curves
+  for i in range(3):
+    smoothed_trajectory[:,i] = movingAverage(trajectory[:,i], radius=50)
+  return smoothed_trajectory
+
+def fixBorder(frame):
+  s = frame.shape
+  # Scale the image 4% without moving the center
+  T = cv2.getRotationMatrix2D((s[1]/2, s[0]/2), 0, 1.04)
+  frame = cv2.warpAffine(frame, T, (s[1], s[0]))
+  return frame
+
+# Read input video
+cap = cv2.VideoCapture('input.mp4') 
+ 
+# Get frame count
+n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) 
+ 
+# Get width and height of video stream
+w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
+h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+# Get frames per second (fps)
+fps = cap.get(cv2.CAP_PROP_FPS)
+
+# Define the codec for output video
+fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+ 
+# Set up output video
+out = cv2.VideoWriter('output.avi', fourcc, fps, (2 * w, h))
+
+# Read first frame
+_, prev = cap.read()  
+
+# Convert frame to grayscale
+prev_gray = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY) 
+
+# Pre-define transformation-store array
+transforms = np.zeros((n_frames-1, 3), np.float32) 
+
+for i in range(n_frames-2):
+  prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01, minDistance=30, blockSize=3)
+  success, curr = cap.read() 
+  if not success: 
+    break 
+  curr_gray = cv2.cvtColor(curr, cv2.COLOR_BGR2GRAY) 
+  curr_pts, status, err = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, prev_pts, None) 
+  assert prev_pts.shape == curr_pts.shape 
+  idx = np.where(status==1)[0]
+  prev_pts = prev_pts[idx]
+  curr_pts = curr_pts[idx]
+  #Find transformation matrix
+  m = cv2.estimateAffine2D(prev_pts, curr_pts, False) 
+  dx = m[0][0][2]
+  dy = m[0][1][2]
+  da = np.arctan2(m[0][1][0], m[0][0][0])   
+  transforms[i] = [dx,dy,da]   
+  prev_gray = curr_gray
+
+# Compute trajectory using cumulative sum of transformations
+trajectory = np.cumsum(transforms, axis=0) 
+trajectory_square = np.zeros((n_frames - 1,))
+for i in range(n_frames - 1):
+  trajectory_square[i] = trajectory[i][0] ** 2 + trajectory[i][1] ** 2 + trajectory[i][2] ** 2
+plt.plot(range(n_frames - 1), trajectory_square)
+plt.show()
+
+# Create variable to store smoothed trajectory
+smoothed_trajectory = smooth(trajectory) 
+smoothed_trajectory_square = np.zeros((n_frames - 1,))
+for i in range(n_frames - 1):
+  smoothed_trajectory_square[i] =  smoothed_trajectory[i][0] ** 2 + smoothed_trajectory[i][1] ** 2 + smoothed_trajectory[i][2] ** 2
+plt.plot(range(n_frames - 1), smoothed_trajectory_square)
+plt.show()
+
+# Calculate difference in smoothed_trajectory and trajectory
+difference = smoothed_trajectory - trajectory 
+
+# Calculate newer transformation array
+transforms_smooth = transforms + difference
+
+# Reset stream to first frame 
+cap.set(cv2.CAP_PROP_POS_FRAMES, 0) 
+ 
+for i in range(n_frames-2):
+  success, frame = cap.read() 
+  if not success:
+    break
+  dx = transforms_smooth[i,0]
+  dy = transforms_smooth[i,1]
+  da = transforms_smooth[i,2]
+  m = np.zeros((2,3), np.float32)
+  m[0,0] = np.cos(da)
+  m[0,1] = -np.sin(da)
+  m[1,0] = np.sin(da)
+  m[1,1] = np.cos(da)
+  m[0,2] = dx
+  m[1,2] = dy
+  # Apply affine wrapping to the given frame
+  frame_stabilized = cv2.warpAffine(frame, m, (w, h))
+
+  # Fix border artifacts
+  frame_stabilized = fixBorder(frame_stabilized) 
+
+  # Write the frame to the file
+  frame_out = cv2.hconcat([frame, frame_stabilized]) 
+  out.write(frame_out)
+
+cap.release()
+out.release()
